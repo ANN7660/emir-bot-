@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const express = require('express');
 
 // Configuration du bot
@@ -36,13 +36,17 @@ const client = new Client({
 
 // Stockage des configurations par serveur
 const serverConfigs = new Map();
+const activeTickets = new Map(); // Map<channelId, { userId, createdAt, ticketNumber }>
+let ticketCounter = 0;
 
 // Fonction pour obtenir la config d'un serveur
 function getServerConfig(guildId) {
     if (!serverConfigs.has(guildId)) {
         serverConfigs.set(guildId, {
             welcomeMessage: 'BVN {user} sur {server} ! Nous sommes maintenant {count} membres.',
-            welcomeChannelId: null
+            welcomeChannelId: null,
+            ticketCategoryId: null,
+            ticketSupportRoles: [] // Array de role IDs
         });
     }
     return serverConfigs.get(guildId);
@@ -66,14 +70,12 @@ client.once('ready', () => {
 client.on('guildMemberAdd', async (member) => {
     const config = getServerConfig(member.guild.id);
     
-    // Chercher un salon approprié si aucun n'est configuré
     let welcomeChannel = null;
     
     if (config.welcomeChannelId) {
         welcomeChannel = member.guild.channels.cache.get(config.welcomeChannelId);
     }
     
-    // Sinon, chercher un salon nommé "bienvenue", "général", "general", "welcome", etc.
     if (!welcomeChannel) {
         welcomeChannel = member.guild.channels.cache.find(ch => 
             ch.name.match(/bienvenue|général|general|welcome|accueil/) && 
@@ -81,7 +83,6 @@ client.on('guildMemberAdd', async (member) => {
         );
     }
     
-    // Sinon, prendre le premier salon où le bot peut écrire
     if (!welcomeChannel) {
         welcomeChannel = member.guild.channels.cache.find(ch =>
             ch.isTextBased() &&
@@ -99,9 +100,184 @@ client.on('guildMemberAdd', async (member) => {
     }
 });
 
+// Événement : Interactions (boutons)
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+    
+    // Bouton créer un ticket
+    if (interaction.customId === 'create_ticket') {
+        const config = getServerConfig(interaction.guild.id);
+        
+        if (!config.ticketCategoryId) {
+            return interaction.reply({
+                content: '❌ Le système de tickets n\'est pas configuré correctement.',
+                ephemeral: true
+            });
+        }
+        
+        // Vérifier si l'utilisateur a déjà un ticket ouvert
+        const existingTicket = Array.from(activeTickets.entries()).find(
+            ([channelId, data]) => data.userId === interaction.user.id && interaction.guild.channels.cache.has(channelId)
+        );
+        
+        if (existingTicket) {
+            const [channelId] = existingTicket;
+            return interaction.reply({
+                content: `❌ Vous avez déjà un ticket ouvert : <#${channelId}>`,
+                ephemeral: true
+            });
+        }
+        
+        await interaction.deferReply({ ephemeral: true });
+        
+        ticketCounter++;
+        
+        try {
+            // Créer le salon de ticket
+            const ticketChannel = await interaction.guild.channels.create({
+                name: `ticket-${String(ticketCounter).padStart(4, '0')}`,
+                type: 0,
+                parent: config.ticketCategoryId,
+                permissionOverwrites: [
+                    {
+                        id: interaction.guild.roles.everyone.id,
+                        deny: [PermissionFlagsBits.ViewChannel]
+                    },
+                    {
+                        id: interaction.user.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ReadMessageHistory,
+                            PermissionFlagsBits.AttachFiles
+                        ]
+                    },
+                    {
+                        id: client.user.id,
+                        allow: [
+                            PermissionFlagsBits.ViewChannel,
+                            PermissionFlagsBits.SendMessages,
+                            PermissionFlagsBits.ManageChannels
+                        ]
+                    }
+                ]
+            });
+            
+            // Ajouter les permissions pour les rôles de support
+            for (const roleId of config.ticketSupportRoles) {
+                await ticketChannel.permissionOverwrites.edit(roleId, {
+                    ViewChannel: true,
+                    SendMessages: true,
+                    ReadMessageHistory: true
+                });
+            }
+            
+            // Enregistrer le ticket
+            activeTickets.set(ticketChannel.id, {
+                userId: interaction.user.id,
+                createdAt: new Date(),
+                ticketNumber: ticketCounter
+            });
+            
+            // Créer l'embed du ticket
+            const ticketEmbed = new EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle(`🎫 Ticket #${String(ticketCounter).padStart(4, '0')}`)
+                .setDescription(`Bienvenue ${interaction.user} !\n\nMerci d'avoir créé un ticket. Un membre du staff vous répondra bientôt.\n\n**Veuillez décrire votre problème ou votre question ci-dessous.**`)
+                .addFields({
+                    name: '📝 Informations',
+                    value: 'Pour fermer ce ticket, cliquez sur le bouton 🔒 Fermer ci-dessous.'
+                })
+                .setFooter({
+                    text: `Créé par ${interaction.user.tag}`,
+                    iconURL: interaction.user.displayAvatarURL()
+                })
+                .setTimestamp();
+            
+            // Bouton pour fermer le ticket
+            const closeButton = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('close_ticket')
+                        .setLabel('🔒 Fermer le ticket')
+                        .setStyle(ButtonStyle.Danger)
+                );
+            
+            // Mention des rôles de support
+            let mentionText = `${interaction.user}`;
+            if (config.ticketSupportRoles.length > 0) {
+                const roleMentions = config.ticketSupportRoles.map(roleId => `<@&${roleId}>`).join(' ');
+                mentionText += ` ${roleMentions}`;
+            }
+            
+            await ticketChannel.send({
+                content: mentionText,
+                embeds: [ticketEmbed],
+                components: [closeButton]
+            });
+            
+            await interaction.editReply({
+                content: `✅ Votre ticket a été créé : ${ticketChannel}`,
+            });
+            
+        } catch (error) {
+            console.error('Erreur lors de la création du ticket:', error);
+            await interaction.editReply({
+                content: '❌ Une erreur est survenue lors de la création du ticket.'
+            });
+        }
+    }
+    
+    // Bouton fermer un ticket
+    if (interaction.customId === 'close_ticket') {
+        const ticketData = activeTickets.get(interaction.channel.id);
+        
+        if (!ticketData) {
+            return interaction.reply({
+                content: '❌ Ce salon n\'est pas un ticket valide.',
+                ephemeral: true
+            });
+        }
+        
+        // Vérifier que c'est le créateur du ticket ou un modérateur
+        if (ticketData.userId !== interaction.user.id && 
+            !interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
+            return interaction.reply({
+                content: '❌ Seul le créateur du ticket ou un modérateur peut le fermer.',
+                ephemeral: true
+            });
+        }
+        
+        try {
+            const closeEmbed = new EmbedBuilder()
+                .setColor(0xFF0000)
+                .setTitle('🔒 Ticket en cours de fermeture')
+                .setDescription('Ce ticket sera supprimé dans **5 secondes**...')
+                .setFooter({
+                    text: `Fermé par ${interaction.user.tag}`,
+                    iconURL: interaction.user.displayAvatarURL()
+                })
+                .setTimestamp();
+            
+            await interaction.reply({ embeds: [closeEmbed] });
+            
+            setTimeout(async () => {
+                activeTickets.delete(interaction.channel.id);
+                await interaction.channel.delete();
+            }, 5000);
+            
+        } catch (error) {
+            console.error('Erreur lors de la fermeture du ticket:', error);
+            await interaction.reply({
+                content: '❌ Une erreur est survenue lors de la fermeture du ticket.',
+                ephemeral: true
+            });
+        }
+    }
+});
+
 // Événement : Messages
 client.on('messageCreate', async (message) => {
-    // Ignorer les bots et les messages sans préfixe
     if (message.author.bot || !message.content.startsWith(PREFIX)) return;
     
     const args = message.content.slice(PREFIX.length).trim().split(/ +/);
@@ -109,13 +285,17 @@ client.on('messageCreate', async (message) => {
     
     // Commande !help
     if (command === 'help') {
-        const embed = {
-            color: 0x5865F2,
-            title: '📚 Commandes du Bot',
-            fields: [
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📚 Commandes du Bot')
+            .addFields(
                 {
                     name: '👋 Bienvenue',
                     value: '`!bvntest` - Tester le message de bienvenue\n`!bvnmsg <message>` - Configurer le message (Modérateurs uniquement)'
+                },
+                {
+                    name: '🎫 Tickets',
+                    value: '`!ticketpanel` - Créer le panel de tickets (Admin)\n`!ticketsetup` - Configurer la catégorie des tickets (Admin)\n`!roleticket <@role>` - Ajouter un rôle de support (Admin)'
                 },
                 {
                     name: '🔒 Modération',
@@ -124,16 +304,9 @@ client.on('messageCreate', async (message) => {
                 {
                     name: '📝 Variables disponibles',
                     value: '`{user}` - Mention du membre\n`{server}` - Nom du serveur\n`{count}` - Nombre de membres'
-                },
-                {
-                    name: '💡 Exemple',
-                    value: '`!bvnmsg Salut {user} ! Bienvenue sur {server} 🎉`'
                 }
-            ],
-            footer: {
-                text: 'Utilisez ! comme préfixe pour toutes les commandes'
-            }
-        };
+            )
+            .setFooter({ text: 'Utilisez ! comme préfixe pour toutes les commandes' });
         
         return message.reply({ embeds: [embed] });
     }
@@ -145,13 +318,12 @@ client.on('messageCreate', async (message) => {
         
         return message.reply({
             content: '🧪 **Test du message de bienvenue :**\n' + testMsg,
-            allowedMentions: { parse: [] } // Évite de mentionner réellement
+            allowedMentions: { parse: [] }
         });
     }
     
-    // Commande !bvnmsg (réservée aux modérateurs)
+    // Commande !bvnmsg
     if (command === 'bvnmsg') {
-        // Vérifier les permissions
         if (!message.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
             return message.reply('❌ Vous devez avoir la permission "Gérer le serveur" pour utiliser cette commande.');
         }
@@ -164,8 +336,6 @@ client.on('messageCreate', async (message) => {
         
         const config = getServerConfig(message.guild.id);
         config.welcomeMessage = newMessage;
-        
-        // Définir le salon actuel comme salon de bienvenue
         config.welcomeChannelId = message.channel.id;
         
         const preview = formatWelcomeMessage(newMessage, message.member, message.guild);
@@ -176,9 +346,114 @@ client.on('messageCreate', async (message) => {
         });
     }
     
+    // Commande !ticketsetup
+    if (command === 'ticketsetup') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
+        }
+        
+        const config = getServerConfig(message.guild.id);
+        
+        try {
+            let ticketCategory = message.guild.channels.cache.find(
+                ch => ch.name === '🎫 TICKETS' && ch.type === 4
+            );
+            
+            if (!ticketCategory) {
+                ticketCategory = await message.guild.channels.create({
+                    name: '🎫 TICKETS',
+                    type: 4,
+                    permissionOverwrites: [
+                        {
+                            id: message.guild.roles.everyone.id,
+                            deny: [PermissionFlagsBits.ViewChannel]
+                        },
+                        {
+                            id: client.user.id,
+                            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ManageChannels]
+                        }
+                    ]
+                });
+            }
+            
+            config.ticketCategoryId = ticketCategory.id;
+            
+            return message.reply(`✅ **Système de tickets configuré !**\n\n📁 Catégorie : ${ticketCategory.name}\n💡 Utilisez \`!ticketpanel\` pour créer le panel de tickets.`);
+        } catch (error) {
+            console.error('Erreur lors de la configuration des tickets:', error);
+            return message.reply('❌ Erreur lors de la configuration. Vérifiez que le bot a les permissions "Gérer les salons".');
+        }
+    }
+    
+    // Commande !roleticket
+    if (command === 'roleticket') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
+        }
+        
+        const role = message.mentions.roles.first();
+        
+        if (!role) {
+            return message.reply('❌ Veuillez mentionner un rôle.\n**Exemple :** `!roleticket @Support`');
+        }
+        
+        const config = getServerConfig(message.guild.id);
+        
+        if (config.ticketSupportRoles.includes(role.id)) {
+            return message.reply(`❌ Le rôle ${role} est déjà configuré comme rôle de support.`);
+        }
+        
+        config.ticketSupportRoles.push(role.id);
+        
+        return message.reply(`✅ Le rôle ${role} sera maintenant mentionné lors de l'ouverture d'un ticket.`);
+    }
+    
+    // Commande !ticketpanel
+    if (command === 'ticketpanel') {
+        if (!message.member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return message.reply('❌ Vous devez être administrateur pour utiliser cette commande.');
+        }
+        
+        const config = getServerConfig(message.guild.id);
+        
+        if (!config.ticketCategoryId) {
+            return message.reply('❌ Vous devez d\'abord configurer le système avec `!ticketsetup`.');
+        }
+        
+        const panelEmbed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('🎫 Support - Créer un ticket')
+            .setDescription('Besoin d\'aide ? Cliquez sur le bouton ci-dessous pour créer un ticket de support.\n\nUn membre de notre équipe vous répondra dès que possible.')
+            .addFields({
+                name: '📋 Comment ça marche ?',
+                value: '1️⃣ Cliquez sur le bouton "Créer un ticket"\n2️⃣ Un salon privé sera créé pour vous\n3️⃣ Décrivez votre problème\n4️⃣ Attendez la réponse du staff'
+            })
+            .setFooter({ text: 'Système de tickets' })
+            .setTimestamp();
+        
+        const button = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('create_ticket')
+                    .setLabel('📩 Créer un ticket')
+                    .setStyle(ButtonStyle.Primary)
+            );
+        
+        try {
+            await message.channel.send({
+                embeds: [panelEmbed],
+                components: [button]
+            });
+            
+            await message.delete().catch(() => {});
+        } catch (error) {
+            console.error('Erreur lors de la création du panel:', error);
+            return message.reply('❌ Une erreur est survenue lors de la création du panel.');
+        }
+    }
+    
     // Commande !lock
     if (command === 'lock') {
-        // Vérifier les permissions
         if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
             return message.reply('❌ Vous devez avoir la permission "Gérer les salons" pour utiliser cette commande.');
         }
@@ -200,7 +475,6 @@ client.on('messageCreate', async (message) => {
     
     // Commande !unlock
     if (command === 'unlock') {
-        // Vérifier les permissions
         if (!message.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
             return message.reply('❌ Vous devez avoir la permission "Gérer les salons" pour utiliser cette commande.');
         }
