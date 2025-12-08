@@ -591,27 +591,41 @@ client.on('messageCreate', async (message) => {
         const embed = new EmbedBuilder()
             .setColor(0x5865F2)
             .setTitle('📚 Commandes du Bot')
+            .setDescription('Voici toutes les commandes disponibles pour gérer le bot.')
             .addFields(
                 {
-                    name: '👋 Bienvenue',
-                    value: '`!bvntest` - Tester le message de bienvenue\n`!bvnmsg <message>` - Configurer le message (Modérateurs)'
+                    name: '👋 Système de Bienvenue',
+                    value: '`!bvntest` - Tester le message de bienvenue\n`!bvnmsg <message>` - Configurer le message (Modérateurs uniquement)\n\n*Variables : `{user}`, `{server}`, `{count}`*',
+                    inline: false
                 },
                 {
-                    name: '🎫 Tickets',
-                    value: '`!ticketpanel` - Créer le panel de tickets (Admin)\n`!ticketsetup` - Configurer la catégorie (Admin)\n`!roleticket <@role>` - Ajouter un rôle de support (Admin)\n`!ticketlog <#salon>` - Définir le salon de logs (Admin)\n`!ticketlimit <nombre>` - Limite de tickets par utilisateur (Admin)\n`!ticketstats` - Voir les statistiques des tickets'
+                    name: '🎫 Système de Tickets',
+                    value: '`!ticketpanel` - Créer le panel de tickets (Admin)\n`!ticketsetup` - Configurer la catégorie des tickets (Admin)\n`!roleticket <@role>` - Ajouter un rôle de support (Admin)\n`!ticketlog <#salon>` - Définir le salon de logs (Admin)\n`!ticketlimit <nombre>` - Limite de tickets par utilisateur (Admin)\n`!ticketstats` - Voir les statistiques des tickets',
+                    inline: false
                 },
                 {
                     name: '🔒 Modération',
-                    value: '`!lock` - Verrouiller le salon actuel\n`!unlock` - Déverrouiller le salon actuel'
+                    value: '`!lock` - Verrouiller le salon actuel (pas de nouveaux messages)\n`!unlock` - Déverrouiller le salon actuel',
+                    inline: false
                 },
                 {
-                    name: '📝 Variables disponibles',
-                    value: '`{user}` - Mention du membre\n`{server}` - Nom du serveur\n`{count}` - Nombre de membres'
+                    name: '✨ Fonctionnalités des Tickets',
+                    value: '• **Catégories multiples** (Support, Réclamation, Question, etc.)\n• **Transcription automatique** envoyée en MP\n• **Système d\'évaluation** avec notation 1-5 étoiles\n• **Revendication** par le staff (bouton "Prendre en charge")\n• **Logs complets** des créations et fermetures\n• **Limite configurable** de tickets par utilisateur',
+                    inline: false
                 }
             )
-            .setFooter({ text: 'Utilisez ! comme préfixe pour toutes les commandes' });
+            .setFooter({ text: 'Bot Discord multifonction • Préfixe: !' })
+            .setTimestamp();
         
-        return message.reply({ embeds: [embed] });
+        const helpButton = new ActionRowBuilder()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId('create_ticket')
+                    .setLabel('📩 Besoin d\'aide ? Ouvrir un ticket')
+                    .setStyle(ButtonStyle.Success)
+            );
+        
+        return message.reply({ embeds: [embed], components: [helpButton] });
     }
     
     // Commande !bvntest
